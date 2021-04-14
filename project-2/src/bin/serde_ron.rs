@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ron::ser::to_string(&a)?;
     
-    buffer.write_all(ron::ser::to_string(&a).unwrap().as_bytes());
+    buffer.write_all(ron::ser::to_string(&a).unwrap().as_bytes())?;
 
     println!("{}", std::str::from_utf8(&buffer).unwrap());
 
