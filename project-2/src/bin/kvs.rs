@@ -29,19 +29,22 @@ enum OptKvs {
 
 fn main() -> Result<()> {
     let opt = Opt::from_args();
-    let path = "kvs.log".to_owned();
+    let mut store = KvStore::new();
 
     match opt.cmd {
         Some(OptKvs::Set {key , value}) => {
-            let data = log::Cmd::new(log::CmdName::Set, key, value);
-            log::append(data, path)?;
+            store.set(key, value)?;
             Ok(())
         },
-        Some(_) => {
-            eprintln!("unimplemented");
-            panic!()
+        Some(OptKvs::Get {key}) => {
+            store.get(key)?;
+            Ok(())
         },
-        _ => {
+        Some(OptKvs::Rm {key}) => {
+            store.remove(key)?;
+            Ok(())
+        },
+        None => {
             panic!()
         }
     }

@@ -1,7 +1,7 @@
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::prelude::*;
 use serde::{Serialize, Deserialize};
-use super::error::Result;
+use super::{Result, err_msg};
 
 /// todo
 #[derive(Serialize, Deserialize)]
@@ -32,12 +32,21 @@ impl Cmd {
 }
 
 /// todo
-pub fn append(data: Cmd, path: String) -> Result<()> {
-    File::create(&path)?;
-    let mut file = File::open(path)?;
+pub fn append(data: Cmd, path: &String) -> Result<()> {
     let data_string = ron::ser::to_string(&data)?;
-    file.write_all(data_string.as_bytes())?;
-    file.write(b"\n")?;
-    file.sync_all()?;
-    Ok(())
+    
+    let file_options = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
+
+    match file_options {
+        Ok(mut file) => {
+            file.write(data_string.as_bytes())?;
+            file.write(b"\n")?;
+            file.sync_all()?;
+            Ok(())
+        },
+        Err(e) => Err(err_msg(e))
+    }
 }
