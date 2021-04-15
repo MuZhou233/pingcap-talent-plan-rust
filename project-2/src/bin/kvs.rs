@@ -1,5 +1,5 @@
-use std;
 use structopt::StructOpt;
+use kvs::*;
 
 #[derive(StructOpt)]
 #[structopt(name = "basic")]
@@ -13,28 +13,36 @@ struct Opt {
 enum OptKvs {
     Set {
         #[structopt(name = "KEY")]
-        key: Option<String>,
+        key: String,
         #[structopt(name = "VALUE")]
-        value: Option<String>
+        value: String
     },
     Get {
         #[structopt(name = "KEY")]
-        key: Option<String>
+        key: String
     },
     Rm {
         #[structopt(name = "KEY")]
-        key: Option<String>
+        key: String
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     let opt = Opt::from_args();
+    let path = "kvs.log".to_owned();
 
     match opt.cmd {
+        Some(OptKvs::Set {key , value}) => {
+            let data = log::Cmd::new(log::CmdName::Set, key, value);
+            log::append(data, path)?;
+            Ok(())
+        },
         Some(_) => {
             eprintln!("unimplemented");
+            panic!()
         },
-        _ => {}
+        _ => {
+            panic!()
+        }
     }
-    panic!()
 }

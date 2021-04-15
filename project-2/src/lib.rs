@@ -11,7 +11,9 @@
 use std::{collections::HashMap};
 use std::path::Path;
 mod error;
-pub use error::{Result, MyErrorKind};
+pub use error::{Result, ErrorKind};
+/// todo
+pub mod log;
 
 /// KvStore struct contains a std HashMap
 pub struct KvStore {
@@ -28,7 +30,7 @@ impl KvStore {
 
     /// this function package the HashMap::insert
     pub fn set(&mut self, key: String, value: String) -> Result<Option<String>> {
-        self.store.insert(key, value)?
+        Ok(self.store.insert(key, value))
     }
 
     /// this function package the HashMap::get
@@ -41,11 +43,11 @@ impl KvStore {
 
     /// this function package the HashMap::remove
     pub fn remove(&mut self, key: String) -> Result<Option<String>> {
-        self.store.remove(&key)?
+        Ok(self.store.remove(&key))
     }
 
     /// todo
     pub fn open(_path: &Path) -> Result<KvStore> {
-        Err(MyErrorKind::Unimplement)?
+        Err(ErrorKind::Unimplement)?
     }
 }

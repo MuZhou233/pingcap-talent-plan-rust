@@ -6,15 +6,21 @@ use std::{fmt::{self, Display}, option::NoneError};
 use failure::{Backtrace, Context, Fail};
 
 /// todo
-pub type Result<T> = std::result::Result<T, MyError>;
+pub type Result<T> = std::result::Result<T, Error>;
 /// todo
 #[derive(Debug)]
-pub struct MyError {
-    inner: Context<MyErrorKind>,
+pub struct Error {
+    inner: Context<ErrorKind>,
 }
 /// todo
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Fail)]
-pub enum MyErrorKind {
+pub enum ErrorKind {
+    /// todo
+    #[fail(display = "ronError")]
+    RonError,
+    /// todo
+    #[fail(display = "ioError")]
+    IoError,
     /// todo
     #[fail(display = "None")]
     None,
@@ -23,7 +29,7 @@ pub enum MyErrorKind {
     Unimplement,
     // ...
 }
-impl Fail for MyError {
+impl Fail for Error {
     fn cause(&self) -> Option<&dyn Fail> {
         self.inner.cause()
     }
@@ -33,33 +39,45 @@ impl Fail for MyError {
     }
 }
 
-impl Display for MyError {
+impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         Display::fmt(&self.inner, f)
     }
 }
 
-impl MyError {
+impl Error {
     /// todo
-    pub fn kind(&self) -> MyErrorKind {
+    pub fn kind(&self) -> ErrorKind {
         *self.inner.get_context()
     }
 }
 
-impl From<MyErrorKind> for MyError {
-    fn from(kind: MyErrorKind) -> MyError {
-        MyError { inner: Context::new(kind) }
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Error {
+        Error { inner: Context::new(kind) }
     }
 }
 
-impl From<Context<MyErrorKind>> for MyError {
-    fn from(inner: Context<MyErrorKind>) -> MyError {
-        MyError { inner: inner }
+impl From<Context<ErrorKind>> for Error {
+    fn from(inner: Context<ErrorKind>) -> Error {
+        Error { inner: inner }
     }
 }
 
-impl From<NoneError> for MyError {
-    fn from(_kind: NoneError) -> MyError {
-        MyError { inner: Context::new(MyErrorKind::None) }
+impl From<NoneError> for Error {
+    fn from(_kind: NoneError) -> Error {
+        Error { inner: Context::new(ErrorKind::None) }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(_kind: std::io::Error) -> Error {
+        Error { inner: Context::new(ErrorKind::IoError) }
+    }
+}
+
+impl From<ron::Error> for Error {
+    fn from(_kind: ron::Error) -> Error {
+        Error { inner: Context::new(ErrorKind::RonError) }
     }
 }
