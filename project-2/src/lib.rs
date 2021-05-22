@@ -1,4 +1,3 @@
-#![feature(try_trait)]
 #![deny(missing_docs)]
 //! KvStore example
 //! ```rust
