@@ -4,7 +4,9 @@ extern crate slog;
 extern crate slog_term;
 
 use slog::Drain;
+use std::net::{TcpListener, TcpStream};
 use kvs::*;
+
 
 #[derive(StructOpt)]
 #[structopt(name = "basic")]
@@ -15,11 +17,11 @@ struct Opt {
     engine: Option<String>,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let decorator = slog_term::PlainSyncDecorator::new(std::io::stderr());
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
 
-    let log = slog::Logger::root(drain, o!("version" => "0.5"));
+    let log = slog::Logger::root(drain, o!("version" => "0.1"));
 
     let opt = Opt::from_args();
 
@@ -29,10 +31,25 @@ fn main() {
         "127.0.0.1:4000".to_owned()
     };
     info!(log, "{}", addr.clone());
+
     let engine = if let Some(engine) = opt.engine {
         engine
     } else {
         "kvs".to_owned()
     };
     info!(log, "{}", engine.clone());
+
+    let listener = TcpListener::bind(addr)?;
+
+    // accept connections and process them serially
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                debug!(log, "new client");
+            },
+            Err(e) => info!(log, "connection failed")
+        }
+    }
+
+    Ok(())
 }

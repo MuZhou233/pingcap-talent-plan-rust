@@ -1,4 +1,5 @@
 use structopt::StructOpt;
+use std::net::TcpStream;
 use kvs::*;
 
 #[derive(StructOpt)]
@@ -31,23 +32,28 @@ enum OptKvs {
 
 fn main() -> Result<()> {
     let opt = Opt::from_args();
-    let mut store = KvStore::new();
+
+    let addr = if let Some(addr) = opt.addr {
+        addr
+    } else {
+        "127.0.0.1:4000".to_owned()
+    };
+
+    let mut stream = TcpStream::connect(addr)?;
+
+    
 
     match opt.cmd {
         Some(OptKvs::Set {key , value}) => {
-            store.set(key, value)?;
-            Ok(())
         },
         Some(OptKvs::Get {key}) => {
-            store.get(key)?;
-            Ok(())
         },
         Some(OptKvs::Rm {key}) => {
-            store.remove(key)?;
-            Ok(())
         },
         None => {
-            panic!()
+            unreachable!()
         }
-    }
+    };
+
+    Ok(())
 }
