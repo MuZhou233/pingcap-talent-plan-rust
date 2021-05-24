@@ -14,10 +14,11 @@ pub struct KvStore {
 }
 
 impl KvsEngine for KvStore {
-    fn set(&mut self, key: String, value: String) -> Result<()> {
+    fn set(&mut self, key: String, value: String) -> Result<Option<String>> {
         let data = Cmd::set(key.clone(), value.clone());
         let position = self.append(data)?;
-        Ok(())
+        self.store.insert(key, position);
+        Ok(None)
     }
 
     fn get(&mut self, key: String) -> Result<Option<String>> {
@@ -32,12 +33,12 @@ impl KvsEngine for KvStore {
         }
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&mut self, key: String) -> Result<Option<String>> {
         match self.store.get(&key) {
             Some(_) => {
                 let data = Cmd::rm(key.clone());
                 self.append(data)?;
-                Ok(())
+                Ok(None)
             }
             None => {
                 let msg = "Key not found";
@@ -73,12 +74,13 @@ impl KvStore {
     }
 
     /// create new KvStore with given path
-    pub fn open(dir_path: &Path) -> Result<KvStore> {
-        KvStore::open_with_file_name(dir_path.to_owned(), "kvs.log".to_owned())
+    pub fn open(dir_path: impl Into<PathBuf>) -> Result<KvStore> {
+        KvStore::open_with_file_name(dir_path, "kvs.log".to_owned())
     }
 
     /// create new KvStore with path and file name
-    pub fn open_with_file_name(dir_path: PathBuf, file_name: String) -> Result<KvStore> {
+    pub fn open_with_file_name(dir_path: impl Into<PathBuf>, file_name: String) -> Result<KvStore> {
+        let dir_path = dir_path.into();
         let file_path = dir_path.join(file_name);
         let store = KvStore::restore(&file_path)?;
 
@@ -90,7 +92,8 @@ impl KvStore {
         })
     }
 
-    fn open_with_file_path(file_path: PathBuf) -> Result<File> {
+    fn open_with_file_path(file_path: impl Into<PathBuf>) -> Result<File> {
+        let file_path = file_path.into();
         let file_options = OpenOptions::new()
         .create(true)
         .read(true)
