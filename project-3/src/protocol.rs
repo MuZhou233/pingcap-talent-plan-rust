@@ -28,6 +28,8 @@ pub enum Request {
     /// todo
     Ping(i8),
     /// todo
+    Shutdown(i8),
+    /// todo
     Set {
         /// todo
         key: String,
@@ -52,6 +54,8 @@ impl ProtocolPayload for Request {}
 pub enum Response {
     /// todo
     Pong(i8),
+    /// todo
+    Shutdown(i8),
     /// todo
     Success {
         /// todo

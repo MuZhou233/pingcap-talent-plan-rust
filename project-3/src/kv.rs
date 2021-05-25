@@ -27,7 +27,7 @@ impl KvsEngine for KvStore {
                 KvStore::get_from_file(&mut self.file, position)
             },
             None => {
-                println!("Key not found");
+                // println!("Key not found");
                 Ok(None)
             }
         }
@@ -42,7 +42,7 @@ impl KvsEngine for KvStore {
             }
             None => {
                 let msg = "Key not found";
-                println!("{}", msg);
+                // println!("{}", msg);
                 Err(err_msg(msg))
             }
         }
@@ -64,7 +64,7 @@ impl KvStore {
         let cmd: Cmd = ron::de::from_bytes(line.as_bytes())?;
         match &cmd {
             Cmd::Set { key, value } => {
-                println!("{}", value);
+                // println!("{}", value);
                 Ok(Some(value.clone()))
             },
             _ => {

@@ -26,12 +26,12 @@ impl KvsEngine for SledKvsEngine {
         })
     }
     fn remove(&mut self, key: String) -> Result<Option<String>> {
-        Ok(match self.store.remove(key)? {
+        match self.store.remove(key)? {
             Some(bytes) => {
-                Some(std::str::from_utf8(&bytes)?.to_owned())
+                Ok(Some(std::str::from_utf8(&bytes)?.to_owned()))
             },
-            None => None,
-        })
+            None => Err(err_msg("Key not found")),
+        }
     }
 }
 
