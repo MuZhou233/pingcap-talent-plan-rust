@@ -112,7 +112,7 @@ impl KvStore {
         let data_string = ron::ser::to_string(&data)?;
         
         if self.allow_compact && self.dir_path.join("kvs.log").metadata()?.len() > 100000 {
-            self.compact()?;
+            // self.compact()?;
         }
         let position = self.file.seek(SeekFrom::End(0))?;
         self.file.write(data_string.as_bytes())?;
