@@ -8,7 +8,6 @@
 //! assert_eq!(store.get("key".to_owned()).unwrap(), Some("value".to_owned()));
 //! ```
 
-mod kv;
 mod error;
 mod engine;
 // mod sledkv;
@@ -16,8 +15,7 @@ mod protocol;
 /// todo
 pub mod thread_pool;
 
-pub use engine::KvsEngine;
 // pub use sledkv::SledKvsEngine;
-pub use kv::KvStore;
+pub use engine::{KvsEngine, KvStore, SledKvsEngine};
 pub use error::Result;
 pub use protocol::{Protocol, Request, Response};

@@ -1,60 +1,68 @@
-use std::{collections::HashMap, fs::{OpenOptions, rename}, io::{BufRead, BufReader, Read, Seek, SeekFrom, Write}, path::PathBuf};
+use std::{collections::HashMap, env::current_dir, fs::{OpenOptions, rename}, io::{BufRead, BufReader, Read, Seek, SeekFrom, Write}, path::PathBuf, sync::{Arc, Mutex}};
 use std::path::Path;
 use std::fs::File;
 use serde::{Serialize, Deserialize};
-use super::error::*;
-use super::engine::KvsEngine;
+use crate::error::*;
+use crate::engine::KvsEngine;
 
 /// KvStore struct contains a std HashMap
 pub struct KvStore {
-    store: HashMap<String, u64>,
-    file: File,
+    store: Arc<Mutex<HashMap<String, u64>>>,
+    file: Arc<Mutex<File>>,
     dir_path: PathBuf,
     allow_compact: bool
 }
 
 impl KvsEngine for KvStore {
-    fn set(&self, key: String, value: String) -> Result<Option<String>> {
-        // let data = Cmd::set(key.clone(), value.clone());
-        // let position = self.append(data)?;
-        // self.store.insert(key, position);
-        Ok(None)
+    fn set(&self, key: String, value: String) -> Result<()> {
+        let data = Cmd::set(key.clone(), value.clone());
+        let position = self.append(data)?;
+        {
+            let mut store = self.store.lock().expect(
+                "Can't lock store"
+            );
+            store.insert(key, position);
+        }
+        Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        // match self.store.get(&key) {
-        //     Some(position) => {
-        //         KvStore::get_from_file(&mut self.file, position)
-        //     },
-        //     None => {
-        //         // println!("Key not found");
-        //         Ok(None)
-        //     }
-        // }
-        Ok(None)
+        let position = {
+            let store = self.store.lock().expect(
+                "Can't lock store"
+            );
+            if let Some(v) = store.get(&key) {
+                v.clone()
+            } else {
+                return Ok(None)
+            }
+        };
+        let mut file = self.file.lock().expect(
+            "Can't lock file"
+        );
+        KvStore::get_from_file(&mut file, &position)
     }
 
-    fn remove(&self, key: String) -> Result<Option<String>> {
-        // match self.store.get(&key) {
-        //     Some(_) => {
-        //         let data = Cmd::rm(key.clone());
-        //         self.append(data)?;
-        //         Ok(None)
-        //     }
-        //     None => {
-        //         let msg = "Key not found";
-        //         // println!("{}", msg);
-        //         Err(err_msg(msg))
-        //     }
-        // }
-        Ok(None)
+    fn remove(&self, key: String) -> Result<()> {
+        {
+            let store = self.store.lock().expect(
+                "Can't lock store"
+            );
+            if let None = store.get(&key) {
+                return Err(err_msg("Key not found"))
+            }
+        }
+
+        let data = Cmd::rm(key.clone());
+        self.append(data)?;
+        Ok(())
     }
 }
 impl Clone for KvStore {
     fn clone(&self) -> Self {
         KvStore{
             store: self.store.clone(),
-            file: self.file.try_clone().unwrap(),
+            file: self.file.clone(),
             dir_path: self.dir_path.clone(),
             allow_compact: self.allow_compact.clone()
         }
@@ -63,8 +71,8 @@ impl Clone for KvStore {
 
 impl KvStore {
     /// return a new KvStore variable
-    pub fn new() -> Self {
-        KvStore::open(Path::new("")).unwrap()
+    pub fn new() -> Result<Self> {
+        Ok(KvStore::open(current_dir()?)?)
     }
 
     fn get_from_file(file: &mut File, position: &u64) -> Result<Option<String>> {
@@ -97,14 +105,14 @@ impl KvStore {
         let store = KvStore::restore(&file_path)?;
 
         Ok(KvStore {
-            store: store,
+            store: Arc::new(Mutex::new(store)),
             file: KvStore::open_with_file_path(file_path)?,
             dir_path: dir_path.to_owned(),
             allow_compact: true
         })
     }
 
-    fn open_with_file_path(file_path: impl Into<PathBuf>) -> Result<File> {
+    fn open_with_file_path(file_path: impl Into<PathBuf>) -> Result<Arc<Mutex<File>>> {
         let file_path = file_path.into();
         let file_options = OpenOptions::new()
         .create(true)
@@ -114,22 +122,30 @@ impl KvStore {
 
         match file_options {
             Ok(file) => {
-                Ok(file)
+                Ok(Arc::new(Mutex::new(file)))
             },
             Err(e) => Err(err_msg(e))
         }
     }
 
-    fn append(&mut self, data: Cmd) -> Result<u64> {
+    fn append(&self, data: Cmd) -> Result<u64> {
         let data_string = ron::ser::to_string(&data)?;
         
         if self.allow_compact && self.dir_path.join("kvs.log").metadata()?.len() > 100000 {
             // self.compact()?;
         }
-        let position = self.file.seek(SeekFrom::End(0))?;
-        self.file.write(data_string.as_bytes())?;
-        self.file.write(b"\n")?;
-        self.file.sync_all()?;
+        let position = {
+            let mut file = self.file.lock().expect(
+                "Can't lock file"
+            );
+
+            let position = file.seek(SeekFrom::End(0))?;
+            file.write(data_string.as_bytes())?;
+            file.write(b"\n")?;
+            file.sync_all()?;
+            position
+        };
+
         Ok(position)
     }
 
@@ -168,24 +184,24 @@ impl KvStore {
         Ok(store)
     }
 
-    fn compact(&mut self) -> Result<()> {
-        let new_store = {
-            let mut new = KvStore::open_with_file_name(self.dir_path.to_owned(), "kvs.log.log".to_owned())?;
-            new.allow_compact = false;
-            for (key, position) in &self.store {
-                new.set(key.to_owned(), KvStore::get_from_file(&mut self.file, position).unwrap().unwrap())?;
-            }
-            new.store
-        };
+    // fn compact(&mut self) -> Result<()> {
+    //     let new_store = {
+    //         let mut new = KvStore::open_with_file_name(self.dir_path.to_owned(), "kvs.log.log".to_owned())?;
+    //         new.allow_compact = false;
+    //         for (key, position) in &self.store {
+    //             new.set(key.to_owned(), KvStore::get_from_file(&mut self.file, position).unwrap().unwrap())?;
+    //         }
+    //         new.store
+    //     };
         
-        rename(self.dir_path.join("kvs.log.log"), self.dir_path.join("kvs.log"))?;
+    //     rename(self.dir_path.join("kvs.log.log"), self.dir_path.join("kvs.log"))?;
         
-        let file_path = self.dir_path.join("kvs.log");
-        self.file = KvStore::open_with_file_path(file_path)?;
-        self.store = new_store;
+    //     let file_path = self.dir_path.join("kvs.log");
+    //     self.file = KvStore::open_with_file_path(file_path)?;
+    //     self.store = new_store;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
 
 /// Use to store serialized data to file

@@ -1,6 +1,7 @@
 use failure::err_msg;
 use io::{BufRead, Read};
 use structopt::StructOpt;
+use thread_pool::SharedQueueThreadPool;
 use std::{fs::OpenOptions, io::Write, net::Shutdown, str};
 use serde::{Serialize, Deserialize};
 use std::io;
@@ -8,8 +9,9 @@ use std::io;
 extern crate slog;
 extern crate slog_term;
 
-use slog::Drain;
+use slog::{Drain, Logger};
 use std::net::{TcpListener, TcpStream};
+use kvs::{thread_pool::ThreadPool};
 use kvs::*;
 
 const ENGINES: &[&str] = &["kvs", "sled"];
@@ -27,7 +29,7 @@ fn main() -> Result<()> {
     let decorator = slog_term::PlainSyncDecorator::new(std::io::stderr());
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
 
-    let log = slog::Logger::root(drain, o!("version" => "0.1"));
+    let log = slog::Logger::root(drain, o!("version" => env!("CARGO_PKG_VERSION")));
 
     let opt = Opt::from_args();
 
@@ -46,19 +48,24 @@ fn main() -> Result<()> {
         })?;
     }
 
-    let mut engine: Box<dyn KvsEngine> = match opt.engine.as_str() {
-        "kvs" => Box::new(KvStore::open("")?),
-        // "sled" => Box::new(SledKvsEngine::open("")?),
-        _ => unreachable!()
-    };
     info!(log, "{}", opt.engine);
 
+    match opt.engine.as_str() {
+        "kvs"  => serve(KvStore::new()?, SharedQueueThreadPool::new(10)?, listener, log),
+        "sled" => serve(SledKvsEngine::new()?, SharedQueueThreadPool::new(10)?, listener, log),
+        _ => unreachable!()
+    }
+
+    Ok(())
+}
+
+fn serve<S: KvsEngine, T: ThreadPool>(engine: S, threads: T, listener: TcpListener, log: Logger) {
     // accept connections and process them serially
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 info!(log, "new client");
-                match handle(&log, &mut engine, stream) {
+                match handle(engine.clone(), &threads, stream) {
                     Ok(_) => 
                         info!(log, "client offline"),
                     Err(e) => 
@@ -68,51 +75,49 @@ fn main() -> Result<()> {
             Err(_) => warn!(log, "client connection failed")
         }
     }
+} 
 
-    Ok(())
-}
-
-fn handle(log: &slog::Logger, engine: &mut Box<dyn KvsEngine> ,stream: TcpStream) -> Result<()> {
+fn handle<S: KvsEngine, T: ThreadPool>(engine: S, threads: &T,stream: TcpStream) -> Result<()> {
     let mut stream = stream;
     
-    loop {
-        let mut reader = io::BufReader::new(stream.try_clone()?);
-        let mut buffer = String::new();
-        reader.read_line(&mut buffer)?;
+    threads.spawn(move || {
+        loop {
+            let mut reader = io::BufReader::new(stream.try_clone().unwrap());
+            let mut buffer = String::new();
+            reader.read_line(&mut buffer).unwrap();
+            
         
-        debug!(log, "get data from client: {:?}", buffer);
-    
-        let data: Protocol<Request> = ron::de::from_str(&buffer)?;
-    
-        debug!(log, "deserialized: {:?}", data);
+            let data: Protocol<Request> = ron::de::from_str(&buffer).unwrap();
         
-        match data.payload {
-            Request::Ping(code) => response(&mut stream, Response::Pong(code))?,
-            Request::Shutdown(code) => {
-                response(&mut stream, Response::Shutdown(code))?;
-                break
-            },
-            Request::Set{key,value} => {
-                match engine.set(key, value) {
-                    Ok(v) => response(&mut stream, Response::Success{value: v})?,
-                    Err(e) => response(&mut stream, Response::Error{msg: e.to_string()})?
-                }
-            },
-            Request::Get{key} => {
-                match engine.get(key) {
-                    Ok(v) => response(&mut stream, Response::Success{value: v})?,
-                    Err(e) => response(&mut stream, Response::Error{msg: e.to_string()})?
-                }
-            },
-            Request::Rm{key} => {
-                match engine.remove(key) {
-                    Ok(v) => response(&mut stream, Response::Success{value: v})?,
-                    Err(e) => response(&mut stream, Response::Error{msg: e.to_string()})?
-                }
-            },
-        };
-    }
-    stream.shutdown(Shutdown::Both)?;
+            
+            match data.payload {
+                Request::Ping(code) => response(&mut stream, Response::Pong(code)).unwrap(),
+                Request::Shutdown(code) => {
+                    response(&mut stream, Response::Shutdown(code)).unwrap();
+                    break
+                },
+                Request::Set{key,value} => {
+                    match engine.set(key, value) {
+                        Ok(_) => response(&mut stream, Response::Success{value: None}).unwrap(),
+                        Err(e) => response(&mut stream, Response::Error{msg: e.to_string()}).unwrap()
+                    }
+                },
+                Request::Get{key} => {
+                    match engine.get(key) {
+                        Ok(v) => response(&mut stream, Response::Success{value: v}).unwrap(),
+                        Err(e) => response(&mut stream, Response::Error{msg: e.to_string()}).unwrap()
+                    }
+                },
+                Request::Rm{key} => {
+                    match engine.remove(key) {
+                        Ok(_) => response(&mut stream, Response::Success{value: None}).unwrap(),
+                        Err(e) => response(&mut stream, Response::Error{msg: e.to_string()}).unwrap()
+                    }
+                },
+            };
+        }
+        stream.shutdown(Shutdown::Both).unwrap();   
+    });
 
     Ok(())
 }
