@@ -3,12 +3,11 @@
 //! ```rust
 //! use kvs::KvStore;
 //!
-//! let mut store = KvStore::new();
+//! let mut store = KvStore::open(".").unwrap();
 //! store.set("key".to_owned(), "value".to_owned());
 //! assert_eq!(store.get("key".to_owned()).unwrap(), Some("value".to_owned()));
 //! ```
-use std::{collections::{BTreeMap, HashMap}, fs::{self, OpenOptions, rename}, io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write}, ops::Range, path::PathBuf};
-use std::path::Path;
+use std::{collections::{BTreeMap, HashMap}, fs::{self, OpenOptions}, io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write}, ops::Range, path::PathBuf};
 use std::fs::File;
 use serde::{Serialize, Deserialize};
 pub use failure::{Error, err_msg};
@@ -24,6 +23,7 @@ pub struct KvStore {
     readers: HashMap<u64, CmdReader>,
     dir_path: PathBuf,
     uncompacted: u64,
+    compacting: bool,
 }
 
 /// Used to store serialized data to file
@@ -57,19 +57,18 @@ impl KvStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<KvStore> {
         let path: PathBuf = path.into();
         fs::create_dir_all(&path)?;
-
-        let slug_file = path.clone().join(".kvs");
+        
+        let slug_file = path.join(".kvs");
         if slug_file.exists() && fs::metadata(slug_file)?.is_file() {
             restore(path.clone())
         } else {
-            let default_id = 1;
+            let default_id = 2;
             let index: BTreeMap<String, CmdPos> = BTreeMap::new();
             let mut readers: HashMap<u64, CmdReader> = HashMap::new();
-            File::create(path.clone().join(".kvs"))?;
+            File::create(path.join(".kvs"))?;
 
-            let (read_file, write_file) = new_log_file(default_id)?;
-            let writer = CmdWriter::new(write_file, 1)?;
-            readers.insert(default_id, CmdReader::new(read_file, default_id)?);
+            let (reader, writer) = new_log_file(path.clone(), default_id)?;
+            readers.insert(default_id, reader);
 
             Ok(KvStore {
                 index,
@@ -77,6 +76,7 @@ impl KvStore {
                 readers,
                 dir_path: path,
                 uncompacted: 0,
+                compacting: false,
             })
         }
     }
@@ -85,7 +85,6 @@ impl KvStore {
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
         let data = Cmd::set(key.clone(), value.clone());
         let pos = self.append(data)?;
-        self.uncompacted += pos.end - pos.start;
         self.index.insert(key, CmdPos::new(self.writer.id, pos.start, pos.end - pos.start));
         Ok(())
     }
@@ -97,35 +96,15 @@ impl KvStore {
                 .expect("Cannot find log reader");
             reader.seek(SeekFrom::Start(pos.pos))?;
             let cmd = reader.take(pos.len);
-            if let Cmd::Set{value, ..} = ron::de::from_reader(cmd)? {
+            if let Cmd::Set{value, ..} = serde_json::de::from_reader(cmd)? {
                 Ok(Some(value))
             } else {
                 Err(err_msg("Unexpected Command"))
             }
         } else {
-            println!("Key not found");
             Ok(None)
         }
     }
-
-    // fn get_from_file(file: &mut File, position: &u64) -> Result<Option<String>> {
-    //     let mut reader = BufReader::new(Read::by_ref(file));
-    //     reader.seek(SeekFrom::Start(position.clone()))?;
-    //     let mut line = String::new();
-    //     reader.read_line(&mut line)?;
-        
-    //     let cmd: Cmd = ron::de::from_bytes(line.as_bytes())?;
-    //     match &cmd.name {
-    //         CmdName::Set => {
-    //             let value = cmd.value.unwrap();
-    //             println!("{}", value);
-    //             Ok(Some(value))
-    //         },
-    //         _ => {
-    //             Err(err_msg("position error"))
-    //         }
-    //     }
-    // }
 
     /// this function package the HashMap::remove
     pub fn remove(&mut self, key: String) -> Result<()> {
@@ -141,64 +120,100 @@ impl KvStore {
         }
     }
 
-    // /// create new KvStore with path and file name
-    // pub fn open_with_file_name(dir_path: PathBuf, file_name: String) -> Result<KvStore> {
-    //     let file_path = dir_path.join(file_name);
-    //     let store = KvStore::restore(&file_path)?;
-
-    //     Ok(KvStore {
-    //         store: store,
-    //         file: KvStore::open_with_file_path(file_path)?,
-    //         dir_path: dir_path.to_owned(),
-    //         allow_compact: true
-    //     })
-    // }
-
-    // fn open_with_file_path(file_path: PathBuf) -> Result<File> {
-    //     let file_options = OpenOptions::new()
-    //     .create(true)
-    //     .read(true)
-    //     .write(true)
-    //     .open(&file_path);
-
-    //     match file_options {
-    //         Ok(file) => {
-    //             Ok(file)
-    //         },
-    //         Err(e) => Err(err_msg(e))
-    //     }
-    // }
-
     fn append(&mut self, data: Cmd) -> Result<Range<u64>> {
         if self.uncompacted >= COMPACTION_THRESHOLD {
-            // self.compact()?;
+            self.compact()?;
         }
         let pos = self.writer.pos;
-        ron::ser::to_writer(&mut self.writer, &data)?;
+        serde_json::ser::to_writer(&mut self.writer, &data)?;
         self.writer.flush()?;
+        self.uncompacted += self.writer.pos - pos;
         Ok(pos..self.writer.pos)
     }
 
-    // fn compact(&mut self) -> Result<()> {
-    //     let new_store = {
-    //         let mut new = KvStore::open_with_file_name(self.dir_path.to_owned(), "kvs.log.log".to_owned())?;
-    //         new.allow_compact = false;
-    //         for (key, position) in &self.store {
-    //             new.set(key.to_owned(), KvStore::get_from_file(&mut self.file, position).unwrap().unwrap())?;
-    //         }
-    //         new.store
-    //     };
-        
-    //     rename(self.dir_path.join("kvs.log.log"), self.dir_path.join("kvs.log"))?;
-        
-    //     let file_path = self.dir_path.join("kvs.log");
-    //     self.file = KvStore::open_with_file_path(file_path)?;
-    //     self.store = new_store;
+/// Log files name should be a continuous number with `.log` extension.
+/// The second biggest number of log file is reserved to be the target
+/// file of next compaction. And the biggest number of log file is active
+/// to write new data.
+///
+/// `.compact-lock` file is used to protect log files from a compact failure
+    fn compact(&mut self) -> Result<()> {
+        let compact_lock = self.dir_path.join(".compact-lock");
+        if self.compacting {
+            return Ok(());
+        } else {
+            self.compacting = true;
+            if compact_lock.exists() {
+                return Err(err_msg("Unexpected compact lock file"));
+            } else {
+                OpenOptions::new().create(true).write(true).open(compact_lock.clone())?;
+            }
+        }
 
-    //     Ok(())
-    // }
+        let id = self.writer.id - 1;
+        // new active log file
+        {
+            let (reader, writer) = new_log_file(self.dir_path.clone(), id + 2)?;
+            self.readers.insert(id + 2, reader);
+            self.writer = writer;
+        };
+        // log file to compact to
+        let mut writer = {
+            let (reader, writer) = new_log_file(self.dir_path.clone(), id)?;
+            self.readers.insert(id, reader);
+            writer
+        };
+        // log file tobe compacted and then delete
+        let mut reader = self.readers.get(&(id + 1))
+            .expect("Cannot find log reader").try_clone()?;
+        
+        let mut stream = serde_json::Deserializer::from_reader(&mut reader).into_iter();
+        let mut index: HashMap<String, Option<String>> = HashMap::new();
+        
+        while let Some(cmd) = stream.next() {
+            match cmd? {
+                Cmd::Set {key, value} => {
+                    index.insert(key, Some(value));
+                },
+                Cmd::Rm {key} => {
+                    index.insert(key, None);
+                }
+            }
+        }
+
+        let mut pos = writer.seek(SeekFrom::Start(0))?;
+        for (key, v) in index {
+            if let Some(value) = v {
+                if self.index.contains_key(&key) {
+                    let data = Cmd::set(key.clone(), value);
+                    serde_json::ser::to_writer(&mut writer, &data)?;
+                    self.index.insert(key, CmdPos::new(writer.id, pos, writer.pos - pos));
+                    writer.flush()?;
+                    pos = writer.pos;
+                }
+            } else {
+                if !self.index.contains_key(&key) {
+                    let data = Cmd::rm(key.clone());
+                    serde_json::ser::to_writer(&mut writer, &data)?;
+                    writer.flush()?;
+                    pos = writer.pos;
+                }
+            }
+        }
+
+        let reader = self.readers.remove(&(id + 1))
+            .expect("Cannot remove log reader");
+        let reader_id = reader.id;
+        drop(reader);
+        fs::remove_file(self.dir_path.join(reader_id.to_string()+".log"))?;
+        
+        fs::remove_file(compact_lock)?;
+        self.compacting = false;
+        Ok(())
+    }
 }
 
+/// see `compact` function for more information
 fn restore(path: PathBuf) -> Result<KvStore> {
     let mut file_list: Vec<u64> = fs::read_dir(&path)?.flatten()
         .map(|entry| entry.path())
@@ -210,9 +225,10 @@ fn restore(path: PathBuf) -> Result<KvStore> {
         }).flatten().collect();
     file_list.sort();
     
-    let compact_lock = path.clone().join(".compact-lock");
+    let compact_lock = path.join(".compact-lock");
     if compact_lock.exists() && fs::metadata(compact_lock)?.is_file() {
-        unimplemented!()
+        // unimplemented!()
+        return Err(err_msg("Log files has an uncompleted compact process.(Failure handle unimplemented)"))
     } else {
         if file_list.is_empty() {
             return Err(err_msg(".kvs file exist but no log files"))
@@ -224,55 +240,61 @@ fn restore(path: PathBuf) -> Result<KvStore> {
         let mut uncompacted = 0;
 
         for i in file_list.iter() {
-            let file = File::open(Path::new(&(i.to_string()+".log")))?;
+            let file = File::open(path.join(i.to_string()+".log"))?;
             let mut reader = CmdReader::new(file, i.to_owned())?;
             let mut pos = reader.seek(SeekFrom::Start(0))?;
-            let mut buffer = ron::de::from_reader(&mut reader).into_iter();
-
-            if i < &(file_list.len() as u64) {
-                uncompacted = pos;
-                reader.id = reader.id - 1;
-            }
-
-            while let Some(cmd) = buffer.next() {
-                match cmd {
+            let mut stream = serde_json::Deserializer::from_reader(&mut reader).into_iter();
+            
+            while let Some(cmd) = stream.next() {
+                let new_pos = stream.byte_offset() as u64;
+                match cmd? {
                     Cmd::Set {key, ..} => {
-                        index.insert(key, CmdPos::new(i.to_owned(), pos, reader.pos - pos));
-                        pos = reader.pos.clone();
+                        index.insert(key, CmdPos::new(i.to_owned(), pos, new_pos - pos));
+                        pos = new_pos;
                     },
                     Cmd::Rm {key} => {
                         index.remove(&key);
-                        pos = reader.pos.clone();
+                        pos = new_pos;
                     }
                 }
             }
 
+            if i > &(file_list.len() as u64) {
+                uncompacted = pos;
+            }
             readers.insert(i.to_owned(), reader);
         }
 
-        let writer = {
-            let id = file_list.len() as u64;
+        let mut writer = {
+            let id = file_list.len() as u64 + 1;
             let write_file = OpenOptions::new()
-                .write(true).open(Path::new(&((id + 1).to_string()+".log")))?;
+                .write(true).open(path.join(id.to_string()+".log"))?;
             CmdWriter::new(write_file, id)?
         };
+        writer.seek(SeekFrom::End(0))?;
 
         Ok(KvStore{
             index,
             writer,
             readers,
             dir_path: path,
-            uncompacted,  
+            uncompacted,
+            compacting: false,
         })
     }
 }
 
-fn new_log_file(id: u64) -> Result<(File, File)> {
-    let file_name = (id + 1).to_string()+".log";
+fn new_log_file(path: PathBuf, id: u64) -> Result<(CmdReader, CmdWriter)> {
+    let file_path = path.join(id.to_string()+".log");
+    if file_path.exists() {
+        return Err(err_msg("Unexpected exist log file"));
+    }
     let write_file = OpenOptions::new()
-        .create(true).write(true).open(Path::new(&file_name))?;
-    let read_file = File::open(file_name)?;
-    Ok((read_file, write_file))
+        .create(true).write(true).open(file_path.clone())?;
+    let writer = CmdWriter::new(write_file, id.clone())?;
+    let read_file = File::open(file_path)?;
+    let reader = CmdReader::new(read_file, id)?;
+    Ok((reader, writer))
 }
 
 impl Cmd {
@@ -319,6 +341,13 @@ impl Write for CmdWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         self.writer.flush()
+    }
+}
+
+impl Seek for CmdWriter {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.pos = self.writer.seek(pos)?;
+        Ok(self.pos)
     }
 }
 
