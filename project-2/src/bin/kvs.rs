@@ -29,7 +29,7 @@ enum OptKvs {
 
 fn main() -> Result<()> {
     let opt = Opt::from_args();
-    let mut store = KvStore::new();
+    let mut store = KvStore::open("./")?;
 
     match opt.cmd {
         Some(OptKvs::Set {key , value}) => {
