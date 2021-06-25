@@ -1,7 +1,6 @@
 use failure::err_msg;
-use io::{BufRead, Write};
 use structopt::StructOpt;
-use std::{io, net::TcpStream, net::Shutdown};
+use std::{net::TcpStream, net::Shutdown};
 use kvs::*;
 
 #[derive(StructOpt)]
@@ -35,56 +34,59 @@ enum OptKvs {
 fn main() -> Result<()> {
     let opt = Opt::from_args();
 
-    let mut stream = TcpStream::connect(opt.addr)?;
+    let mut stream = TcpStream::connect(opt.addr.clone())?;
     
-    match request(&mut stream, Request::Ping(0))? {
-        Response::Pong(c) if c == 0 => {},
-        _ => return Err(err_msg("protocol error"))
-    };
-    
+    request_once(&mut stream, Request::Ping(0), |res| 
+        match res {
+            Response::Pong(c) if c == 0 => Ok(()),
+            _ => Err(err_msg("protocol error"))
+    })?;
+
     match opt.cmd {
         OptKvs::Set {key , value} => {
-            match request(&mut stream, Request::Set{key: key, value: value})? {
-                Response::Success{value:_} => (),
-                Response::Error{msg: e} =>
-                    return Err(err_msg(e)),
-                _ => return Err(err_msg("Unexpected response"))
-            }
+            request_once(&mut stream, Request::Set{key, value}, |res| 
+                match res {
+                    Response::Success{value:_} => Ok(()),
+                    Response::Error{msg: e} =>
+                        Err(err_msg(e)),
+                    _ => Err(err_msg("Unexpected response"))
+            })?;
         },
         OptKvs::Get {key} => {
-            match request(&mut stream, Request::Get{key: key})? {
-                Response::Success{value: Some(v)} => 
-                    println!("{}", v),
-                Response::Success{value: None} =>
-                    println!("Key not found"),
-                Response::Error{msg: e} =>
-                    return Err(err_msg(e)),
-                _ => return Err(err_msg("Unexpected response"))
-            }
+            request_once(&mut stream, Request::Get{key}, |res| {
+                match res {
+                    Response::Success{value: Some(v)} => 
+                        println!("{}", v),
+                    Response::Success{value: None} =>
+                        println!("Key not found"),
+                    Response::Error{msg: e} =>
+                        return Err(err_msg(e)),
+                    _ => return Err(err_msg("Unexpected response"))
+                }
+                Ok(())
+            })?;
         },
         OptKvs::Rm {key} => {
-            match request(&mut stream, Request::Rm{key: key})? {
-                Response::Success{value: _} => (),
-                Response::Error{msg: e} =>
-                    return Err(err_msg(e)),
-                _ => return Err(err_msg("Unexpected response"))
-            }
+            request_once(&mut stream, Request::Rm{key}, |res| 
+                match res {
+                    Response::Success{value: _} => Ok(()),
+                    Response::Error{msg: e} =>
+                        return Err(err_msg(e)),
+                    _ => return Err(err_msg("Unexpected response"))
+            })?;
         }
     };
-    request(&mut stream, Request::Shutdown(0))?;
+    Protocol::send(&mut stream, Protocol::new(Request::Shutdown))?;
     stream.shutdown(Shutdown::Both)?;
 
     Ok(())
 }
 
-fn request(stream: &mut TcpStream, data: Request) -> Result<Response> {
-    ron::ser::to_writer(stream.try_clone()?, &Protocol::new(data))?;
-    stream.write(b"\n")?;
-    
-    let mut reader = io::BufReader::new(stream.try_clone()?);
-    let mut buffer = String::new();
-    reader.read_line(&mut buffer)?;
-    let res: Protocol<Response> = ron::de::from_str(&buffer)?;
-    
-    Ok(res.payload)
+fn request_once<F: FnMut(Response) -> Result<()>>(stream: &mut TcpStream, req: Request, mut handler: F) -> Result<()> {
+    Protocol::send(stream, Protocol::new(req))?;
+    Protocol::listen(stream, |data| {
+        handler(data.payload)?;
+        Ok(true)
+    })?;
+    Ok(())
 }

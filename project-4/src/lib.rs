@@ -10,12 +10,10 @@
 
 mod error;
 mod engine;
-// mod sledkv;
 mod protocol;
 /// todo
 pub mod thread_pool;
 
-// pub use sledkv::SledKvsEngine;
 pub use engine::{KvsEngine, KvStore, SledKvsEngine};
 pub use error::Result;
 pub use protocol::{Protocol, Request, Response};

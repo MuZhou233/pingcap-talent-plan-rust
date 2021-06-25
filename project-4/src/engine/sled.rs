@@ -1,27 +1,22 @@
-use std::{env::current_dir, path::{Path, PathBuf}, sync::{Arc, Mutex}};
+use std::{path::PathBuf, sync::{Arc, Mutex}};
 use sled;
 use crate::error::*;
 use crate::engine::KvsEngine;
 
-/// todo
+/// This package and implementation `sled` as one of the engines in this crate 
+#[derive(Clone)]
 pub struct SledKvsEngine {
-    store: Arc<Mutex<sled::Db>>
+    store: sled::Db
 }
 
 impl KvsEngine for SledKvsEngine {
     fn set(&self, key: String, value: String) -> Result<()> {
-        let store = self.store.lock().expect(
-            "Can't lock store"
-        );
-        store.insert(key, value.as_bytes())?;
-        store.flush()?;
+        self.store.insert(key, value.as_bytes())?;
+        self.store.flush()?;
         Ok(())
     }
     fn get(&self, key: String) -> Result<Option<String>> {
-        let store = self.store.lock().expect(
-            "Can't lock store"
-        );
-        Ok(match store.get(key)? {
+        Ok(match self.store.get(key)? {
             Some(bytes) => {
                 Some(std::str::from_utf8(&bytes)?.to_owned())
             },
@@ -29,32 +24,18 @@ impl KvsEngine for SledKvsEngine {
         })
     }
     fn remove(&self, key: String) -> Result<()> {
-        let store = self.store.lock().expect(
-            "Can't lock store"
-        );
-        store.remove(key)?;
-        store.flush()?;
+        self.store.remove(key)?;
+        self.store.flush()?;
         Ok(())
-    }
-}
-impl Clone for SledKvsEngine {
-    fn clone(&self) -> Self {
-        SledKvsEngine {
-            store: self.store.clone()
-        }
     }
 }
 
 impl SledKvsEngine {
-    /// return a new SledKvsEngine variable
-    pub fn new() -> Result<Self> {
-        Ok(SledKvsEngine::open(current_dir()?)?)
-    }
-    /// todo
+    /// Create a `SledKvsEngine` with given path
     pub fn open(dir_path: impl Into<PathBuf>) -> Result<SledKvsEngine> {
         let dir_path = dir_path.into();
         Ok(SledKvsEngine{
-            store: Arc::new(Mutex::new(sled::open(dir_path)?))
+            store: sled::open(dir_path)?
         })
     } 
 }

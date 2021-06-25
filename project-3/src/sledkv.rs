@@ -15,10 +15,12 @@ impl KvsEngine for SledKvsEngine {
         Ok(())
     }
     fn get(&mut self, key: String) -> Result<Option<String>> {
-        Ok(self.store.get(key)?.and_then(|bytes| 
-            std::str::from_utf8(&bytes).ok()
-                .and_then(|s| Some(s.to_owned()))
-        ))
+        Ok(match self.store.get(key)? {
+            Some(bytes) => {
+                Some(std::str::from_utf8(&bytes)?.to_owned())
+            },
+            None => None,
+        })
     }
     fn remove(&mut self, key: String) -> Result<()> {
         self.store.remove(key)?.ok_or(err_msg("Key not found"))?;
