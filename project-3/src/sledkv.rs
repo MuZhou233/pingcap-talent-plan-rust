@@ -3,40 +3,32 @@ use sled;
 use super::error::*;
 use super::engine::KvsEngine;
 
-/// todo
+/// This package and implementation `sled` as one of the engines in this crate 
 pub struct SledKvsEngine {
     store: sled::Db
 }
 
 impl KvsEngine for SledKvsEngine {
-    fn set(&mut self, key: String, value: String) -> Result<Option<String>> {
-        Ok(match self.store.insert(key, value.as_bytes())? {
-            Some(bytes) => {
-                Some(std::str::from_utf8(&bytes)?.to_owned())
-            },
-            None => None
-        })
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        self.store.insert(key, value.as_bytes())?;
+        self.store.flush()?;
+        Ok(())
     }
     fn get(&mut self, key: String) -> Result<Option<String>> {
-        Ok(match self.store.get(key)? {
-            Some(bytes) => {
-                Some(std::str::from_utf8(&bytes)?.to_owned())
-            },
-            None => None,
-        })
+        Ok(self.store.get(key)?.and_then(|bytes| 
+            std::str::from_utf8(&bytes).ok()
+                .and_then(|s| Some(s.to_owned()))
+        ))
     }
-    fn remove(&mut self, key: String) -> Result<Option<String>> {
-        match self.store.remove(key)? {
-            Some(bytes) => {
-                Ok(Some(std::str::from_utf8(&bytes)?.to_owned()))
-            },
-            None => Err(err_msg("Key not found")),
-        }
+    fn remove(&mut self, key: String) -> Result<()> {
+        self.store.remove(key)?.ok_or(err_msg("Key not found"))?;
+        self.store.flush()?;
+        Ok(())
     }
 }
 
 impl SledKvsEngine {
-    /// todo
+    /// Create a `SledKvsEngine` with given path
     pub fn open(dir_path: impl Into<PathBuf>) -> Result<SledKvsEngine> {
         let dir_path = dir_path.into();
         Ok(SledKvsEngine{

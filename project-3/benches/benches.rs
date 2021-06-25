@@ -1,11 +1,13 @@
 use kvs::{KvStore, KvsEngine, SledKvsEngine};
 use rand::{FromEntropy, Rng, SeedableRng, random};
 use rand::rngs::SmallRng;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use criterion::BenchmarkId;
 use tempfile::TempDir;
 
 pub fn criterion_benchmark(c: &mut Criterion) {
+    let mut c = c.benchmark_group("engine-bench");
+    // c.sample_size(20);
     let seed: u64 = random();
     let kvs_dir = TempDir::new().expect("unable to create temporary working directory");
     let kvs_dir = kvs_dir.path();
@@ -27,19 +29,6 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 		});
 	});
 
-    c.bench_with_input(BenchmarkId::new("kvs_read", seed), &seed, 
-    move |b, &seed| {
-        let mut key_rng = SmallRng::seed_from_u64(seed);
-
-        let mut store = KvStore::open(kvs_dir).unwrap();
-        
-	    b.iter(|| {
-		    for _  in 0..1000 {
-                store.get(key_rng.gen_range(1, 100000).to_string()).unwrap();
-            }
-		});
-	});
-
     c.bench_with_input(BenchmarkId::new("sled_write", seed), &seed, 
     move |b, &seed| {
         let mut key_rng = SmallRng::seed_from_u64(seed);
@@ -51,6 +40,19 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 		    for _  in 0..100 {
                 store.set(key_rng.gen_range(1, 100000).to_string(), 
                          value_rng.gen_range(1, 100000).to_string()).unwrap();
+            }
+		});
+	});
+
+    c.bench_with_input(BenchmarkId::new("kvs_read", seed), &seed, 
+    move |b, &seed| {
+        let mut key_rng = SmallRng::seed_from_u64(seed);
+
+        let mut store = KvStore::open(kvs_dir).unwrap();
+        
+	    b.iter(|| {
+		    for _  in 0..1000 {
+                store.get(key_rng.gen_range(1, 100000).to_string()).unwrap();
             }
 		});
 	});

@@ -1,12 +1,6 @@
 #![deny(missing_docs)]
-//! KvStore example
-//! ```rust
-//! use kvs::KvStore;
-//!
-//! let mut store = KvStore::new();
-//! store.set("key".to_owned(), "value".to_owned());
-//! assert_eq!(store.get("key".to_owned()).unwrap(), Some("value".to_owned()));
-//! ```
+//! KvStore 
+//! a simple key-value store
 
 mod kv;
 mod error;

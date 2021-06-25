@@ -1,11 +1,17 @@
 use super::error::Result;
 
-/// todo
+/// Trait for a key value store engine
 pub trait KvsEngine {
-    /// todo
-    fn set(&mut self, key: String, vale: String) -> Result<Option<String>>;
-    /// todo
+    /// Set the pair of key and value
+    fn set(&mut self, key: String, vale: String) -> Result<()>;
+    /// Get the value by key
+    ///
+    /// Return `None` if key does not exist
     fn get(&mut self, key: String) -> Result<Option<String>>;
-    /// todo
-    fn remove(&mut self, key: String) -> Result<Option<String>>;
+    /// Remove the value by key
+    ///
+    /// # Errors
+    ///
+    /// Error with message `Key not found` will be retured if key does not exist 
+    fn remove(&mut self, key: String) -> Result<()>;
 }

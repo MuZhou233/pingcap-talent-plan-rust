@@ -1,3 +1,3 @@
 pub use failure::{Error, err_msg};
-/// Custom Result type
+/// Result type for kvs
 pub type Result<T> = std::result::Result<T, Error>;

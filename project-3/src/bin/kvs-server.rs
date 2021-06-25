@@ -1,9 +1,8 @@
 use failure::err_msg;
-use io::{BufRead, Read};
 use structopt::StructOpt;
-use std::{fs::OpenOptions, io::Write, net::Shutdown, str};
+use std::{fs::OpenOptions, net::Shutdown, str};
+use std::env::current_dir;
 use serde::{Serialize, Deserialize};
-use std::io;
 #[macro_use]
 extern crate slog;
 extern crate slog_term;
@@ -27,7 +26,7 @@ fn main() -> Result<()> {
     let decorator = slog_term::PlainSyncDecorator::new(std::io::stderr());
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
 
-    let log = slog::Logger::root(drain, o!("version" => "0.1"));
+    let log = slog::Logger::root(drain, o!());
 
     let opt = Opt::from_args();
 
@@ -47,8 +46,8 @@ fn main() -> Result<()> {
     }
 
     let mut engine: Box<dyn KvsEngine> = match opt.engine.as_str() {
-        "kvs" => Box::new(KvStore::open("")?),
-        "sled" => Box::new(SledKvsEngine::open("")?),
+        "kvs" => Box::new(KvStore::open(current_dir()?)?),
+        "sled" => Box::new(SledKvsEngine::open(current_dir()?)?),
         _ => unreachable!()
     };
     info!(log, "{}", opt.engine);
@@ -72,54 +71,39 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle(log: &slog::Logger, engine: &mut Box<dyn KvsEngine> ,stream: TcpStream) -> Result<()> {
+fn handle(_log: &slog::Logger, engine: &mut Box<dyn KvsEngine> ,stream: TcpStream) -> Result<()> {
     let mut stream = stream;
     
-    loop {
-        let mut reader = io::BufReader::new(stream.try_clone()?);
-        let mut buffer = String::new();
-        reader.read_line(&mut buffer)?;
-        
-        debug!(log, "get data from client: {:?}", buffer);
-    
-        let data: Protocol<Request> = ron::de::from_str(&buffer)?;
-    
-        debug!(log, "deserialized: {:?}", data);
-        
-        match data.payload {
-            Request::Ping(code) => response(&mut stream, Response::Pong(code))?,
-            Request::Shutdown(code) => {
-                response(&mut stream, Response::Shutdown(code))?;
-                break
-            },
+    Protocol::listen(&mut stream.try_clone()?, |data: Protocol<Request>| {
+        let data = match data.payload {
+            Request::Ping(code) =>  Response::Pong(code),
+            Request::Shutdown => return Ok(true),
             Request::Set{key,value} => {
                 match engine.set(key, value) {
-                    Ok(v) => response(&mut stream, Response::Success{value: v})?,
-                    Err(e) => response(&mut stream, Response::Error{msg: e.to_string()})?
+                    Ok(_) => Response::Success{value: None},
+                    Err(e) => Response::Error{msg: e.to_string()}
                 }
             },
             Request::Get{key} => {
                 match engine.get(key) {
-                    Ok(v) => response(&mut stream, Response::Success{value: v})?,
-                    Err(e) => response(&mut stream, Response::Error{msg: e.to_string()})?
+                    Ok(v) => Response::Success{value: v},
+                    Err(e) => Response::Error{msg: e.to_string()}
                 }
             },
             Request::Rm{key} => {
                 match engine.remove(key) {
-                    Ok(v) => response(&mut stream, Response::Success{value: v})?,
-                    Err(e) => response(&mut stream, Response::Error{msg: e.to_string()})?
+                    Ok(_) => Response::Success{value: None},
+                    Err(e) => Response::Error{msg: e.to_string()}
                 }
             },
         };
-    }
+        Protocol::send(&mut stream, Protocol::new(data))?;
+
+        Ok(false)
+    })?;
+
     stream.shutdown(Shutdown::Both)?;
 
-    Ok(())
-}
-
-fn response(stream: &mut TcpStream, data: Response) -> Result<()> {
-    ron::ser::to_writer(stream.try_clone()?, &Protocol::new(data))?;
-    stream.write(b"\n")?;
     Ok(())
 }
 

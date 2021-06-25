@@ -1,69 +1,103 @@
+use std::io::{Read, Write};
 use serde::{Serialize, Deserialize};
+use crate::error::Result;
 
-const VERSION: &str = "0.1";
+const VERSION: &str = "0.2";
 
-/// todo
+/// Protocol used by server and client
+///
+/// This provides the structure of message and function to send and receive message
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Protocol<T: ProtocolPayload> {
+    /// Set private to prevent wrong version of protocol lib
     version: String,
-    /// todo
+    /// Protocol payload
     pub payload: T
 }
 
+/// This identify available payloads
 pub trait ProtocolPayload {}
 
-impl<T: ProtocolPayload> Protocol<T> {
-    /// todo
+impl<'a, T: ProtocolPayload + Serialize + Deserialize<'a>> Protocol<T> {
+    /// Create `Protocol` with given payload
     pub fn new(data: T) -> Self {
         Protocol {
             version: VERSION.to_owned(),
             payload: data
         }
     }
+
+    /// Return protocol version
+    pub fn version(&self) -> &str {
+        &self.version
+    } 
+
+    /// Listen on reader and call handler when every single message has received
+    ///
+    /// Listen will keep when handler returns `Ok(false)`
+    /// You could think that as "Ok? really?", so you return "Ok, but one more" to keep listening
+    pub fn listen<R: Read, F>(reader: &mut R, mut handler: F) -> Result<()> 
+      where F: FnMut(Protocol<T>) -> Result<bool> {
+        let mut stream = serde_json::Deserializer::from_reader(reader).into_iter();
+            
+        while let Some(cmd) = stream.next() {
+            if handler(cmd?)? {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send message to writer with given payload
+    pub fn send<W: Write>(writer: &mut W, data: Self) -> Result<()> {
+        serde_json::ser::to_writer(writer, &data)?;
+        Ok(())
+    }
 }
 
-/// todo
+/// Payload send from client to server
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Request {
-    /// todo
+    /// Response should be `Pong` with same number
     Ping(i8),
-    /// todo
-    Shutdown(i8),
-    /// todo
+    /// Both shutdown connection
+    Shutdown,
+    /// set key to value
     Set {
-        /// todo
+        /// 
         key: String,
-        /// todo
+        /// 
         value: String
     },
-    /// todo
+    /// get value by key
     Get {
-        /// todo
+        /// 
         key: String
     },
-    /// todo
+    /// rm value by key
     Rm {
-        /// todo
+        /// 
         key: String
     }
 }
 impl ProtocolPayload for Request {}
 
-/// todo
+/// Payload send from server to client
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Response {
-    /// todo
+    /// Send when received a `Ping`
     Pong(i8),
-    /// todo
-    Shutdown(i8),
-    /// todo
+    /// Both shutdown connection
+    Shutdown,
+    /// Request command success, response with String when needed
     Success {
-        /// todo
+        /// 
         value: Option<String>
     },
-    /// todo
+    /// Request command failed, response with error message
     Error {
-        /// todo
+        /// 
         msg: String
     }
 }
