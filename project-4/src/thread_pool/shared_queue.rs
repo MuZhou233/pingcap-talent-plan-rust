@@ -1,18 +1,22 @@
 use std::{sync::Arc, thread};
 
-use crossbeam::channel;
+use crossbeam_channel::{unbounded, Sender, Receiver};
 
 use crate::error::Result;
 use super::ThreadPool;
 
-/// todo
+/// A thread pool using a shared queue inside.
+///
+/// If a spawned task panics, the old thread will be destroyed and a new one will be
+/// created. It fails silently when any failure to create the thread at the OS level
+/// is captured after the thread pool is created. So, the thread number in the pool
+/// can decrease to zero, then spawning a task to the thread pool will panic.
 pub struct SharedQueueThreadPool {
-    queue: channel::Sender<Box<dyn FnOnce() + Send + 'static>>,
-    shared: Arc<ThreadPoolSharedData>
+    queue: Sender<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 struct ThreadPoolSharedData {
-    job: channel::Receiver<Box<dyn FnOnce() + Send + 'static>>
+    job: Receiver<Box<dyn FnOnce() + Send + 'static>>
 }
 
 struct Sentinel {
@@ -22,7 +26,7 @@ struct Sentinel {
 
 impl ThreadPool for SharedQueueThreadPool {
     fn new(threads: u32) -> Result<Self> where Self:Sized {
-        let (tx, rx) = channel::unbounded::<Box<dyn FnOnce() + Send + 'static>>();
+        let (tx, rx) = unbounded::<Box<dyn FnOnce() + Send + 'static>>();
         
         let shared = Arc::new(ThreadPoolSharedData{
             job: rx
@@ -34,7 +38,6 @@ impl ThreadPool for SharedQueueThreadPool {
         
         Ok(SharedQueueThreadPool{
             queue: tx,
-            shared
         })
     }
     fn spawn<F>(&self, job: F) where F: FnOnce() + Send + 'static {

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::TryInto, fs::{self, OpenOptions}, io::{self, BufWriter, Read, Seek, SeekFrom, Write}, ops::Range, path::PathBuf, sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, atomic::{AtomicBool, AtomicU64, Ordering}}};
+use std::{collections::HashMap, convert::TryInto, fs::{self, OpenOptions}, io::{self, BufWriter, Read, Seek, SeekFrom, Write}, ops::Range, path::PathBuf, sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, atomic::{AtomicU64, Ordering}}};
 use std::fs::File;
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
@@ -6,13 +6,13 @@ use system_interface::fs::FileIoExt;
 use crate::error::*;
 use crate::engine::KvsEngine;
 
-const COMPACTION_THRESHOLD: u64 = 1024 * 1024 * 100;
+const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
 
 /// The `KvStore` stores string key-value pairs
 ///
 /// This engine act as a simple and weak Log-Structued Database.
 /// Data will be stored on disk named by id number with `.log` extension.
-/// It will keep a `BTreeMap` in memory for quick indexing.
+/// It will keep a `DashMap` in memory for quick indexing.
 pub struct KvStore {
     index: Arc<DashMap<String, CmdPos>>,
     writer: Arc<Mutex<CmdWriter>>,
@@ -51,8 +51,9 @@ struct CmdReader {
 impl KvsEngine for KvStore {
     fn set(&self, key: String, value: String) -> Result<()> {
         let data = Cmd::set(key.clone(), value.clone());
-        let pos = self.append(data)?;
-        self.index.insert(key, CmdPos::new(self.writer_id.load(Ordering::Relaxed), pos.start, pos.end - pos.start));
+        self.append(data, |pos| {
+            self.index.insert(key, CmdPos::new(self.writer_id.load(Ordering::Relaxed), pos.start, pos.end - pos.start));
+        })?;
         Ok(())
     }
 
@@ -77,8 +78,9 @@ impl KvsEngine for KvStore {
     fn remove(&self, key: String) -> Result<()> {
         if self.index.contains_key(&key) {
             let data = Cmd::rm(key.clone());
-            self.append(data)?;
-            self.index.remove(&key).expect("Key not found");
+            self.append(data, |_| {
+                self.index.remove(&key).expect("Key not found");
+            })?;
             Ok(())
         } else {
             let msg = "Key not found";
@@ -122,8 +124,9 @@ impl KvStore {
         }
     }
 
-    fn append(&self, data: Cmd) -> Result<Range<u64>> {
-        if self.uncompacted.load(Ordering::Relaxed) >= COMPACTION_THRESHOLD {
+    /// Used by `set` and `remove`, do all of the changes with `self.writer` lock to ensure data consistency
+    fn append<F: FnOnce(Range<u64>)>(&self, data: Cmd, update_index: F) -> Result<()> {
+        if self.uncompacted.load(Ordering::SeqCst) >= COMPACTION_THRESHOLD {
             self.compact()?;
         }
         let mut writer = self.writer.lock().expect(
@@ -133,7 +136,8 @@ impl KvStore {
         serde_json::ser::to_writer(&mut *writer, &data)?;
         writer.flush()?;
         self.uncompacted.fetch_add(writer.pos - pos, Ordering::Relaxed);
-        Ok(pos..writer.pos)
+        update_index(pos..writer.pos);
+        Ok(())
     }
 
 /// Clears stale entries in the log.
@@ -142,16 +146,16 @@ impl KvStore {
 /// The second biggest number of log file is reserved to be the target
 /// file of next compaction. And the biggest number of log file is active
 /// to write new data.
-///
-/// `.compact-lock` file is used to protect log files from a compact failure
     fn compact(&self) -> Result<()> {
+        // `self.compacting` is used to keep only one thread run compact at a time
+        // `.compact-lock` file is used to protect log files from a compact failure
         let compact_lock = self.dir_path.join(".compact-lock");
         {
-            let mut compacting = *lock(&self.compacting);
-            if compacting {
+            let mut compacting = lock(&self.compacting);
+            if *compacting {
                 return Ok(());
             } else {
-                compacting = true;
+                *compacting = true;
                 if compact_lock.exists() {
                     return Err(err_msg("Unexpected compact lock file"));
                 } else {
@@ -165,7 +169,10 @@ impl KvStore {
         {
             let (reader, writer) = new_log_file(self.dir_path.to_path_buf(), id + 2)?;
             self.readers.insert(id + 2, Arc::new(RwLock::new(reader)));
-            *lock(&self.writer) = writer;
+            let mut self_writer = lock(&self.writer);
+            self.uncompacted.swap(0, Ordering::SeqCst);
+            *self_writer = writer;
+            self.writer_id.fetch_sub(1, Ordering::SeqCst);
         };
         // log file to compact to
         let mut writer = {
@@ -173,12 +180,13 @@ impl KvStore {
             self.readers.insert(id, Arc::new(RwLock::new(reader)));
             writer
         };
-        // log file tobe compacted and then delete
+        // log file to be compacted and then delete
         let reader = self.readers.get(&(id + 1))
             .expect("Cannot find log reader");
         let mut reader = read_lock(&reader).try_clone()?;
-        reader.seek(SeekFrom::Start(0));
+        reader.seek(SeekFrom::Start(0))?;
         
+        // replay source file to generate data for compact
         let mut stream = serde_json::Deserializer::from_reader(&mut reader).into_iter();
         let mut index: HashMap<String, Option<String>> = HashMap::new();
         
@@ -193,10 +201,14 @@ impl KvStore {
             }
         }
 
+        // lock `self.writer` to ensure data consistency during compacting
+        let _ = lock(&self.writer);
         let mut pos = writer.seek(SeekFrom::Start(0))?;
         for (key, v) in index {
-            if let Some(value) = v {
-                if self.index.contains_key(&key) {
+            if let (Some(value), Some(cmdpos)) = (v, self.index.get(&key)) {
+                if cmdpos.id == writer.id + 1 {
+                    // `DashMap` is not lock-free. drop to release lock
+                    drop(cmdpos);
                     let data = Cmd::set(key.clone(), value);
                     serde_json::ser::to_writer(&mut writer, &data)?;
                     self.index.insert(key, CmdPos::new(writer.id, pos, writer.pos - pos));
@@ -212,13 +224,15 @@ impl KvStore {
         }
         writer.flush()?;
 
-        // let reader = self.readers.get(&(id + 1))
-        //     .expect("Cannot remove log reader");
-        // let mut reader = write_lock(&reader);
-        // let reader_id = reader.id;
-        // drop(reader);
-        // fs::remove_file(self.dir_path.join(reader_id.to_string()+".log"))?;
-        
+        // release source file
+        let reader = self.readers.get(&(id + 1))
+            .expect("Cannot remove log reader");
+        let reader = write_lock(&reader);
+        let reader_id = reader.id;
+        drop(reader);
+        fs::remove_file(self.dir_path.join(reader_id.to_string()+".log"))?;
+
+        // unlock
         fs::remove_file(compact_lock)?;
         *lock(&self.compacting) = false;
         Ok(())
@@ -246,7 +260,7 @@ fn restore(path: PathBuf) -> Result<KvStore> {
     
     let compact_lock = path.join(".compact-lock");
     if compact_lock.exists() && fs::metadata(compact_lock)?.is_file() {
-        // TODO: try to resume compact
+        // TODO: try to resume compact process
         return Err(err_msg("Log files has an uncompleted compact process.(Failure handle unimplemented)"))
     } else {
         if file_list.is_empty() {

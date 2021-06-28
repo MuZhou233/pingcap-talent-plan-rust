@@ -27,4 +27,4 @@ sled = "0.34.6"
 rayon = "1.5.1"
 dashmap = { version = "4.0.2", features = ["serde", "rayon"] }
 system-interface = "0.6.6"
-crossbeam = "0.8.1"
+crossbeam-channel = "0.5.1"
