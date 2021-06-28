@@ -1,5 +1,6 @@
 use failure::err_msg;
 use structopt::StructOpt;
+use thread_pool::ThreadPool;
 use std::{fs::OpenOptions, net::Shutdown, str};
 use std::env::current_dir;
 use serde::{Serialize, Deserialize};
@@ -48,21 +49,21 @@ fn main() -> Result<()> {
     info!(log, "{}", opt.engine);
 
     match opt.engine.as_str() {
-        "kvs" => serve(&log, KvStore::open(current_dir()?)?, listener)?,
-        "sled" => serve(&log, SledKvsEngine::open(current_dir()?)?, listener)?,
+        "kvs" => serve(&log, KvStore::open(current_dir()?)?, thread_pool::SharedQueueThreadPool::new(10)?, listener)?,
+        "sled" => serve(&log, SledKvsEngine::open(current_dir()?)?, thread_pool::SharedQueueThreadPool::new(10)?, listener)?,
         _ => unreachable!()
     };
 
     Ok(())
 }
 
-fn serve<E: KvsEngine>(log: &slog::Logger, mut engine: E, listener: TcpListener) -> Result<()> {
+fn serve<E: KvsEngine, T: ThreadPool>(log: &slog::Logger, engine: E, threads: T, listener: TcpListener) -> Result<()> {
     // accept connections and process them serially
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 info!(log, "new client");
-                match handle(&log, &mut engine, stream) {
+                match handle(&log, engine.clone(), &threads, stream) {
                     Ok(_) => 
                         info!(log, "client offline"),
                     Err(e) => 
@@ -75,38 +76,40 @@ fn serve<E: KvsEngine>(log: &slog::Logger, mut engine: E, listener: TcpListener)
     Ok(())
 }
 
-fn handle<E: KvsEngine>(_log: &slog::Logger, engine: &mut E,stream: TcpStream) -> Result<()> {
+fn handle<E: KvsEngine, T: ThreadPool>(_log: &slog::Logger, engine: E, threads: &T, stream: TcpStream) -> Result<()> {
     let mut stream = stream;
     
-    Protocol::listen(&mut stream.try_clone()?, |data: Protocol<Request>| {
-        let data = match data.payload {
-            Request::Ping(code) =>  Response::Pong(code),
-            Request::Shutdown => return Ok(true),
-            Request::Set{key,value} => {
-                match engine.set(key, value) {
-                    Ok(_) => Response::Success{value: None},
-                    Err(e) => Response::Error{msg: e.to_string()}
-                }
-            },
-            Request::Get{key} => {
-                match engine.get(key) {
-                    Ok(v) => Response::Success{value: v},
-                    Err(e) => Response::Error{msg: e.to_string()}
-                }
-            },
-            Request::Rm{key} => {
-                match engine.remove(key) {
-                    Ok(_) => Response::Success{value: None},
-                    Err(e) => Response::Error{msg: e.to_string()}
-                }
-            },
-        };
-        Protocol::send(&mut stream, Protocol::new(data))?;
-
-        Ok(false)
-    })?;
-
-    stream.shutdown(Shutdown::Both)?;
+    threads.spawn(move || {
+        Protocol::listen(&mut stream.try_clone().unwrap(), |data: Protocol<Request>| {
+            let data = match data.payload {
+                Request::Ping(code) =>  Response::Pong(code),
+                Request::Shutdown => return Ok(true),
+                Request::Set{key,value} => {
+                    match engine.set(key, value) {
+                        Ok(_) => Response::Success{value: None},
+                        Err(e) => Response::Error{msg: e.to_string()}
+                    }
+                },
+                Request::Get{key} => {
+                    match engine.get(key) {
+                        Ok(v) => Response::Success{value: v},
+                        Err(e) => Response::Error{msg: e.to_string()}
+                    }
+                },
+                Request::Rm{key} => {
+                    match engine.remove(key) {
+                        Ok(_) => Response::Success{value: None},
+                        Err(e) => Response::Error{msg: e.to_string()}
+                    }
+                },
+            };
+            Protocol::send(&mut stream, Protocol::new(data))?;
+    
+            Ok(false)
+        }).unwrap();
+    
+        stream.shutdown(Shutdown::Both).unwrap();
+    });
 
     Ok(())
 }

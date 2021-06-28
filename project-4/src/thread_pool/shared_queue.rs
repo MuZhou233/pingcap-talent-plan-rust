@@ -1,16 +1,18 @@
-use std::{sync::{Arc, Mutex, mpsc::{Receiver, Sender, channel}}, thread};
+use std::{sync::Arc, thread};
+
+use crossbeam::channel;
 
 use crate::error::Result;
 use super::ThreadPool;
 
 /// todo
 pub struct SharedQueueThreadPool {
-    queue: Sender<Box<dyn FnOnce() + Send + 'static>>,
+    queue: channel::Sender<Box<dyn FnOnce() + Send + 'static>>,
     shared: Arc<ThreadPoolSharedData>
 }
 
 struct ThreadPoolSharedData {
-    job: Mutex<Receiver<Box<dyn FnOnce() + Send + 'static>>>
+    job: channel::Receiver<Box<dyn FnOnce() + Send + 'static>>
 }
 
 struct Sentinel {
@@ -20,10 +22,10 @@ struct Sentinel {
 
 impl ThreadPool for SharedQueueThreadPool {
     fn new(threads: u32) -> Result<Self> where Self:Sized {
-        let (tx, rx) = channel::<Box<dyn FnOnce() + Send + 'static>>();
+        let (tx, rx) = channel::unbounded::<Box<dyn FnOnce() + Send + 'static>>();
         
         let shared = Arc::new(ThreadPoolSharedData{
-            job: Mutex::new(rx)
+            job: rx
         });
 
         for _ in 0..threads {
@@ -32,7 +34,7 @@ impl ThreadPool for SharedQueueThreadPool {
         
         Ok(SharedQueueThreadPool{
             queue: tx,
-            shared: shared
+            shared
         })
     }
     fn spawn<F>(&self, job: F) where F: FnOnce() + Send + 'static {
@@ -50,9 +52,7 @@ impl SharedQueueThreadPool {
 
             loop {
                 let job = match {
-                    let receiver = shared.data.job.lock().expect(
-                        "Can't lock receiver"
-                    );
+                    let receiver = &shared.data.job;
                     receiver.recv()
                 } {
                     Ok(job) => job,
@@ -71,7 +71,7 @@ impl SharedQueueThreadPool {
 impl Sentinel {
     fn new(data: Arc<ThreadPoolSharedData>) -> Self {
         Sentinel {
-            data: data,
+            data,
             active: true
         }
     }

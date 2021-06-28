@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::{Arc, Mutex}};
+use std::path::PathBuf;
 use sled;
 use crate::error::*;
 use crate::engine::KvsEngine;
@@ -24,7 +24,7 @@ impl KvsEngine for SledKvsEngine {
         })
     }
     fn remove(&self, key: String) -> Result<()> {
-        self.store.remove(key)?;
+        self.store.remove(key)?.ok_or(err_msg("Key not found"))?;
         self.store.flush()?;
         Ok(())
     }

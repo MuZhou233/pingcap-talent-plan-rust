@@ -1,7 +1,8 @@
-use std::{collections::{BTreeMap, HashMap}, convert::TryInto, fs::{self, OpenOptions}, io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write}, ops::Range, path::PathBuf, sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard}};
+use std::{collections::HashMap, convert::TryInto, fs::{self, OpenOptions}, io::{self, BufWriter, Read, Seek, SeekFrom, Write}, ops::Range, path::PathBuf, sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, atomic::{AtomicBool, AtomicU64, Ordering}}};
 use std::fs::File;
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
+use system_interface::fs::FileIoExt;
 use crate::error::*;
 use crate::engine::KvsEngine;
 
@@ -17,9 +18,9 @@ pub struct KvStore {
     writer: Arc<Mutex<CmdWriter>>,
     readers: Arc<DashMap<u64, Arc<RwLock<CmdReader>>>>,
     dir_path: Arc<PathBuf>,
-    uncompacted: Arc<RwLock<u64>>,
+    uncompacted: Arc<AtomicU64>,
     compacting: Arc<Mutex<bool>>,
-    writer_id: Arc<RwLock<u64>>,
+    writer_id: Arc<AtomicU64>,
 }
 
 /// Store serialized data to files
@@ -42,11 +43,7 @@ struct CmdWriter {
     id:  u64
 }
 struct CmdReader {
-    reader: BufReader<File>,
-    /// Used by `try_clone` function.
-    /// 
-    /// Not a good solution for `try_clone` but it Works!
-    file_path: PathBuf,
+    reader: File,
     pos: u64,
     id:  u64
 }
@@ -55,7 +52,7 @@ impl KvsEngine for KvStore {
     fn set(&self, key: String, value: String) -> Result<()> {
         let data = Cmd::set(key.clone(), value.clone());
         let pos = self.append(data)?;
-        self.index.insert(key, CmdPos::new(*read_lock(&self.writer_id), pos.start, pos.end - pos.start));
+        self.index.insert(key, CmdPos::new(self.writer_id.load(Ordering::Relaxed), pos.start, pos.end - pos.start));
         Ok(())
     }
 
@@ -64,10 +61,9 @@ impl KvsEngine for KvStore {
             let reader = self.readers.get(&pos.id)
                 .expect("Cannot find log reader");
 
-            let mut reader = write_lock(&*reader);
-            reader.seek(SeekFrom::Start(pos.pos))?;
+            let reader = read_lock(&*reader);
             let mut cmd = vec![0u8; pos.len.try_into()?];
-            reader.read_exact(&mut cmd)?;
+            reader.read_exact_at(&mut cmd, pos.pos)?;
             if let Cmd::Set{value, ..} = serde_json::de::from_slice(&mut cmd)? {
                 Ok(Some(value))
             } else {
@@ -119,16 +115,16 @@ impl KvStore {
                 writer: Arc::new(Mutex::new(writer)),
                 readers: Arc::new(readers),
                 dir_path: Arc::new(path),
-                uncompacted: Arc::new(RwLock::new(0)),
+                uncompacted: Arc::new(AtomicU64::new(0)),
                 compacting: Arc::new(Mutex::new(false)),
-                writer_id: Arc::new(RwLock::new(default_id)),
+                writer_id: Arc::new(AtomicU64::new(default_id)),
             })
         }
     }
 
     fn append(&self, data: Cmd) -> Result<Range<u64>> {
-        if *read_lock(&self.uncompacted) >= COMPACTION_THRESHOLD {
-            // self.compact()?;
+        if self.uncompacted.load(Ordering::Relaxed) >= COMPACTION_THRESHOLD {
+            self.compact()?;
         }
         let mut writer = self.writer.lock().expect(
             "Can't lock writer"
@@ -136,7 +132,7 @@ impl KvStore {
         let pos = writer.pos;
         serde_json::ser::to_writer(&mut *writer, &data)?;
         writer.flush()?;
-        *write_lock(&self.uncompacted) += writer.pos - pos;
+        self.uncompacted.fetch_add(writer.pos - pos, Ordering::Relaxed);
         Ok(pos..writer.pos)
     }
 
@@ -148,83 +144,84 @@ impl KvStore {
 /// to write new data.
 ///
 /// `.compact-lock` file is used to protect log files from a compact failure
-    fn compact(&mut self) -> Result<()> {
-        unimplemented!();
-//         let compact_lock = self.dir_path.join(".compact-lock");
-//         {
-//             let compacting = *write_lock(self.compacting);
-//             if compacting {
-//                 return Ok(());
-//             } else {
-//                 compacting = true;
-//                 if compact_lock.exists() {
-//                     return Err(err_msg("Unexpected compact lock file"));
-//                 } else {
-//                     OpenOptions::new().create(true).write(true).open(compact_lock.clone())?;
-//                 }
-//             }
-//         }
+    fn compact(&self) -> Result<()> {
+        let compact_lock = self.dir_path.join(".compact-lock");
+        {
+            let mut compacting = *lock(&self.compacting);
+            if compacting {
+                return Ok(());
+            } else {
+                compacting = true;
+                if compact_lock.exists() {
+                    return Err(err_msg("Unexpected compact lock file"));
+                } else {
+                    OpenOptions::new().create(true).write(true).open(compact_lock.clone())?;
+                }
+            }
+        }
 
-//         let id = self.writer.id - 1;
-//         // new active log file
-//         {
-//             let (reader, writer) = new_log_file(self.dir_path.clone(), id + 2)?;
-//             self.readers.insert(id + 2, reader);
-//             self.writer = writer;
-//         };
-//         // log file to compact to
-//         let mut writer = {
-//             let (reader, writer) = new_log_file(self.dir_path.clone(), id)?;
-//             self.readers.insert(id, reader);
-//             writer
-//         };
-//         // log file tobe compacted and then delete
-//         let mut reader = self.readers.get(&(id + 1))
-//             .expect("Cannot find log reader").try_clone()?;
+        let id = self.writer_id.load(Ordering::Relaxed) - 1;
+        // new active log file
+        {
+            let (reader, writer) = new_log_file(self.dir_path.to_path_buf(), id + 2)?;
+            self.readers.insert(id + 2, Arc::new(RwLock::new(reader)));
+            *lock(&self.writer) = writer;
+        };
+        // log file to compact to
+        let mut writer = {
+            let (reader, writer) = new_log_file(self.dir_path.to_path_buf(), id)?;
+            self.readers.insert(id, Arc::new(RwLock::new(reader)));
+            writer
+        };
+        // log file tobe compacted and then delete
+        let reader = self.readers.get(&(id + 1))
+            .expect("Cannot find log reader");
+        let mut reader = read_lock(&reader).try_clone()?;
+        reader.seek(SeekFrom::Start(0));
         
-//         let mut stream = serde_json::Deserializer::from_reader(&mut reader).into_iter();
-//         let mut index: HashMap<String, Option<String>> = HashMap::new();
+        let mut stream = serde_json::Deserializer::from_reader(&mut reader).into_iter();
+        let mut index: HashMap<String, Option<String>> = HashMap::new();
         
-//         while let Some(cmd) = stream.next() {
-//             match cmd? {
-//                 Cmd::Set {key, value} => {
-//                     index.insert(key, Some(value));
-//                 },
-//                 Cmd::Rm {key} => {
-//                     index.insert(key, None);
-//                 }
-//             }
-//         }
+        while let Some(cmd) = stream.next() {
+            match cmd? {
+                Cmd::Set {key, value} => {
+                    index.insert(key, Some(value));
+                },
+                Cmd::Rm {key} => {
+                    index.insert(key, None);
+                }
+            }
+        }
 
-//         let mut pos = writer.seek(SeekFrom::Start(0))?;
-//         for (key, v) in index {
-//             if let Some(value) = v {
-//                 if self.index.contains_key(&key) {
-//                     let data = Cmd::set(key.clone(), value);
-//                     serde_json::ser::to_writer(&mut writer, &data)?;
-//                     self.index.insert(key, CmdPos::new(writer.id, pos, writer.pos - pos));
-//                     writer.flush()?;
-//                     pos = writer.pos;
-//                 }
-//             } else {
-//                 if !self.index.contains_key(&key) {
-//                     let data = Cmd::rm(key.clone());
-//                     serde_json::ser::to_writer(&mut writer, &data)?;
-//                     writer.flush()?;
-//                     pos = writer.pos;
-//                 }
-//             }
-//         }
+        let mut pos = writer.seek(SeekFrom::Start(0))?;
+        for (key, v) in index {
+            if let Some(value) = v {
+                if self.index.contains_key(&key) {
+                    let data = Cmd::set(key.clone(), value);
+                    serde_json::ser::to_writer(&mut writer, &data)?;
+                    self.index.insert(key, CmdPos::new(writer.id, pos, writer.pos - pos));
+                    pos = writer.pos;
+                }
+            } else {
+                if !self.index.contains_key(&key) {
+                    let data = Cmd::rm(key.clone());
+                    serde_json::ser::to_writer(&mut writer, &data)?;
+                    pos = writer.pos;
+                }
+            }
+        }
+        writer.flush()?;
 
-//         let reader = self.readers.remove(&(id + 1))
-//             .expect("Cannot remove log reader");
-//         let reader_id = reader.id;
-//         drop(reader);
-//         fs::remove_file(self.dir_path.join(reader_id.to_string()+".log"))?;
+        // let reader = self.readers.get(&(id + 1))
+        //     .expect("Cannot remove log reader");
+        // let mut reader = write_lock(&reader);
+        // let reader_id = reader.id;
+        // drop(reader);
+        // fs::remove_file(self.dir_path.join(reader_id.to_string()+".log"))?;
         
-//         fs::remove_file(compact_lock)?;
-//         self.compacting = false;
-//         Ok(())
+        fs::remove_file(compact_lock)?;
+        *lock(&self.compacting) = false;
+        Ok(())
     }
 }
 
@@ -300,9 +297,9 @@ fn restore(path: PathBuf) -> Result<KvStore> {
             writer: Arc::new(Mutex::new(writer)),
             readers: Arc::new(readers),
             dir_path: Arc::new(path),
-            uncompacted: Arc::new(RwLock::new(uncompacted)),
+            uncompacted: Arc::new(AtomicU64::new(uncompacted)),
             compacting: Arc::new(Mutex::new(false)),
-            writer_id: Arc::new(RwLock::new(id))
+            writer_id: Arc::new(AtomicU64::new(id))
         })
     }
 }
@@ -322,6 +319,11 @@ fn new_log_file(path: PathBuf, id: u64) -> Result<(CmdReader, CmdWriter)> {
     Ok((reader, writer))
 }
 
+fn lock<'a, T>(lock: &'a Arc<Mutex<T>>) -> MutexGuard<'a, T> {
+    lock.lock().expect(
+        format!("Can't get mutex lock, variable type {}", std::any::type_name::<T>()).as_ref()
+    )
+}
 fn read_lock<'a, T>(lock: &'a Arc<RwLock<T>>) -> RwLockReadGuard<'a, T> {
     lock.read().expect(
         format!("Can't get read lock, variable type {}", std::any::type_name::<T>()).as_ref()
@@ -373,7 +375,7 @@ impl  CmdPos {
 }
 
 impl CmdWriter {
-    fn new(mut inner: File, id: u64) -> Result<Self> {
+    fn new(inner: File, id: u64) -> Result<Self> {
         let pos = inner.seek(SeekFrom::Current(0))?;
         Ok(CmdWriter {
             writer: BufWriter::new(inner),
@@ -404,11 +406,10 @@ impl Seek for CmdWriter {
 
 impl CmdReader {
     fn new(file_path: PathBuf, id: u64) -> Result<Self> {
-        let mut inner = File::open(&file_path)?;
+        let inner = File::open(&file_path)?;
         let pos = inner.seek(SeekFrom::Current(0))?;
         Ok(CmdReader {
-            reader: BufReader::new(inner),
-            file_path,
+            reader: inner,
             pos,
             id
         })
@@ -416,11 +417,14 @@ impl CmdReader {
 
     fn try_clone(&self) -> Result<Self> {
         Ok(CmdReader {
-            reader: BufReader::new(File::open(&self.file_path)?),
-            file_path: self.file_path.clone(),
+            reader: self.reader.try_clone()?,
             pos: self.pos.clone(),
             id: self.id.clone(),  
         })
+    }
+ 
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+        Ok(self.reader.read_exact_at(buf, offset)?)
     }
 }
 
